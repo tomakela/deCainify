@@ -1,0 +1,5 @@
+out/
+dist/
+build/
+deCainify_gui.spec
+*.pyc

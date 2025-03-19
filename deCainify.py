@@ -2,7 +2,6 @@ import argparse, os, sys
 
 from PIL import Image
 import numpy as np
-import cv2
 
 # Define the signature patterns
 ico32x32_signature = bytes.fromhex('28 00 00 00 20 00 00 00 40 00 00 00 01 00 08 00')
@@ -14,7 +13,7 @@ ico48x48_length = 3752
 ico_file_header48x48 = bytes.fromhex('00 00 01 00 01 00 30 30 00 00 00 00 00 00 A8 0E 00 00 16 00 00 00')
 
 #very slow version of the sfall's flavor of crc32 (there probably is a short / standard implementation?)
-def calc_crc(data):
+def crc_str(data):
   crc = 0xFFFFFFFF
   polynomial = 0x1EDC6F41
   
@@ -28,6 +27,85 @@ def calc_crc(data):
     
   return f'0x{crc ^ 0xFFFFFFFF:08x}'
 
+class DeCainify():
+
+  def __init__(self, input_fname):
+    with open(input_fname, 'rb') as f:
+      data = f.read()
+    self.data = bytearray(data)
+
+    self.start_32x32 = self.data.find(ico32x32_signature)
+    self.b_icon_32x32 = self.data[self.start_32x32:self.start_32x32+ico32x32_length]
+    #self.b_header_32x32 = self.b_icon_32x32[:40]
+    self.b_cmap_32x32 = self.b_icon_32x32[40:40+256*4]
+    self.b_bmp_32x32  = self.b_icon_32x32[40+256*4:-128]
+    self.b_mask_32x32 = self.b_icon_32x32[-128:]
+
+    self.start_48x48 = self.data.find(ico48x48_signature)
+    self.b_icon_48x48 = self.data[self.start_48x48:self.start_48x48+ico48x48_length]
+    self.b_header_48x48 = self.b_icon_48x48[:40]
+    self.b_cmap_48x48 = self.b_icon_48x48[40:40+256*4]
+    self.b_bmp_48x48  = self.b_icon_48x48[40+256*4:-384]
+    #self.b_mask_48x48 = self.b_icon_48x48[-384:]
+
+    self.crc_32x32 = crc_str(self.b_icon_32x32)
+    self.crc_32x32_verified = self.crc_32x32 == '0xe5494664'
+    self.crc_48x48 = crc_str(self.b_icon_48x48)
+    self.crc_48x48_verified = self.crc_48x48 == '0xfffdfa49'
+
+  def process(self):
+    ### 32x32 -> 48:48:
+    cmap_32x32 = np.frombuffer(self.b_cmap_32x32, dtype=np.uint8).reshape(256, 4)[:,:3]
+    bmp_32x32  = np.frombuffer(self.b_bmp_32x32,  dtype=np.uint8).reshape(32, 32)
+    self.mask_32x32 = np.frombuffer(self.b_mask_32x32, dtype=np.uint8).reshape(32, 4)
+    self.mask_32x32 = np.unpackbits(self.mask_32x32).reshape(32, -1)
+    self.rgb_image_32x32 = cmap_32x32[bmp_32x32] # or is it rbg? or ?
+
+    cmap_48x48 = np.frombuffer(self.b_cmap_48x48, dtype=np.uint8).reshape(256, 4)[:,:3]
+    bmp_48x48  = np.frombuffer(self.b_bmp_48x48,  dtype=np.uint8).reshape(48, 48)
+    self.rgb_image_48x48 = cmap_48x48[bmp_48x48] # or is it rbg? or ?
+
+    self.resampled_image = Image.fromarray(self.rgb_image_32x32.astype(np.uint8)).resize((48, 48), Image.Resampling.HAMMING)
+    self.resampled_mask = np.array(Image.fromarray(self.mask_32x32.astype(np.uint8)).resize((48, 48), Image.NEAREST))
+    padded_resampled_mask = np.pad(self.resampled_mask,((0,0),(0,16)),constant_values=1)
+
+    indexed_image = Image.fromarray(np.array(self.resampled_image)).convert('P', palette=Image.ADAPTIVE, colors=256)
+    colormap = np.pad(np.array(indexed_image.getpalette()).reshape(-1, 3),((0,0),(0,1)))
+    # e.g. nn interp would require this to make palette shape[0] 256
+    colormap = np.pad(colormap,((0,256-colormap.shape[0]),(0,0)))
+
+    self.new_b_mask_48x48 = np.packbits(padded_resampled_mask, axis=-1).tobytes()
+    self.new_b_bmp_48x48 = np.asarray(indexed_image).tobytes()
+    self.new_b_cmap_48x48 = colormap.flatten(order='C').astype('uint8').tobytes()
+
+  def print_mask(self): # print pip boy head mask
+    for c in np.flipud(self.resampled_mask): # silly BMP convention
+      for r in c:
+        print(r,end='')
+      print()
+
+  def save_exe(self, output_fname):
+    try:
+      data = self.data.copy()
+      data[self.start_48x48+40:self.start_48x48+40+256*4+48*48+8*48] = self.new_b_cmap_48x48 + self.new_b_bmp_48x48 + self.new_b_mask_48x48
+      with open(output_fname, 'wb') as out:
+        out.write(data)
+      crc = crc_str(data)
+      return crc
+    except Exception:
+      print(Exception)
+      return -1
+
+  def save_ico(self, output_fname):
+    try:
+      data = ico_file_header48x48 + self.b_header_48x48 + self.new_b_cmap_48x48 + self.new_b_bmp_48x48 + self.new_b_mask_48x48
+      with open(output_fname, 'wb') as out:
+        out.write(data)
+      crc = crc_str(data)
+      return crc
+    except Exception:
+      print(Exception)
+      return -1
 
 def main():
   print('Fallout2 executable de-Cainify tool. It replaces 48x48 icon with Tim''s face with Vault Boy.\n')
@@ -60,82 +138,31 @@ def main():
     print(f'Error: {args.output} exists. Use --overwrite to allow overwriting.')
     sys.exit()
 
-  with open(args.input, 'rb') as f:
-    data = f.read()
-  data = bytearray(data)
+  dc = DeCainify(args.input)
   
-  start_32x32 = data.find(ico32x32_signature)
-  b_icon_32x32 = data[start_32x32:start_32x32+ico32x32_length]    
-  #b_header_32x32 = b_icon_32x32[:40]
-  b_cmap_32x32 = b_icon_32x32[40:40+256*4]
-  b_bmp_32x32  = b_icon_32x32[40+256*4:-128]
-  b_mask_32x32 = b_icon_32x32[-128:]
-
-  start_48x48 = data.find(ico48x48_signature)
-  b_icon_48x48 = data[start_48x48:start_48x48+ico48x48_length]
-  b_header_48x48 = b_icon_48x48[:40]
-  #b_cmap_48x48 = b_icon_48x48[40:40+256*4]
-  #b_bmp_48x48  = b_icon_48x48[40+256*4:-384]
-  #b_mask_48x48 = b_icon_48x48[-384:]
-
-  crc_32x32 = calc_crc(b_icon_32x32)
-  print(f'Checking 32x32 icon CRC: {crc_32x32}', end='')
-  if crc_32x32 == '0xe5494664':
-    print(' ok')
+  if dc.crc_32x32_verified:
+    print('32x32 CRC ok')
   else:
-    print(' CRC 32x32 mismatch.')
-  
+    print('32x32 CRC mismatch.')
 
-  crc_48x48 = calc_crc(b_icon_48x48)
-  print(f'Checking 48x48 icon CRC: {crc_48x48}', end='')
-  if crc_48x48 == '0xfffdfa49':
-    print(' ok')
+  if dc.crc_48x48_verified:
+    print('48x48 CRC ok')
   else:
-    print(' CRC 48x48 mismatch.')
+    print('48x48 CRC mismatch.')
 
-  if not args.ignore and (crc_32x32 != '0xe5494664' or crc_48x48 != '0xfffdfa49'):
+  if not args.ignore and (not dc.crc_32x32_verified or not dc.crc_48x48_verified):
     print('Use --ignore to ignore CRC checks.')
     sys.exit()
 
-  ### 32x32 -> 48:48:
-  cmap = np.frombuffer(b_cmap_32x32, dtype=np.uint8).reshape(256, 4)[:,:3]
-  bmp  = np.frombuffer(b_bmp_32x32,  dtype=np.uint8).reshape(32, 32)
-  mask = np.frombuffer(b_mask_32x32, dtype=np.uint8).reshape(32, 4)
-  mask = np.unpackbits(mask).reshape(32, -1)
-
-  rgb_image = cmap[bmp] # or is it rbg? or ?
-  resampled_image = cv2.resize(rgb_image.astype(np.uint8), (48, 48), interpolation=cv2.INTER_AREA)
-
-  resampled_mask = cv2.resize(mask, (48, 48), interpolation=cv2.INTER_NEAREST)
-  padded_resampled_mask = np.pad(resampled_mask,((0,0),(0,16)),constant_values=1)
-  new_b_mask_48x48 = np.packbits(padded_resampled_mask, axis=-1).tobytes()
-
-  indexed_image = Image.fromarray(resampled_image).convert('P', palette=Image.ADAPTIVE, colors=256)
-  colormap = np.pad(np.array(indexed_image.getpalette()).reshape(-1, 3),((0,0),(0,1)))
-  # e.g. nn requires this to make palette shape[0] 256
-  colormap = np.pad(colormap,((0,256-colormap.shape[0]),(0,0)))
-  new_b_bmp_48x48 = np.asarray(indexed_image).tobytes()
-  new_b_cmap_48x48 = colormap.flatten(order='C').astype('uint8').tobytes()
-
-
-  # print pip boy head mask
-  for c in np.flipud(resampled_mask): # silly BMP convention
-    for r in c:
-      print(r,end='')
-    print()        
+  dc.process()
+  dc.print_mask()
 
   if MODE == 'EXE':
-    data[start_48x48+40:start_48x48+40+256*4+48*48+8*48] = new_b_cmap_48x48 + new_b_bmp_48x48 + new_b_mask_48x48
-    with open(args.output, 'wb') as out:
-      out.write(data)
+    crc = dc.save_exe(args.output)
     print(f'Extracted data written to EXE file {args.output}')
-    with open(args.output,"rb") as f:
-      data = f.read()
-    print(f'If you use sfall, add CRC to your ddraw.ini (comma separated list): ExtraCRC={calc_crc(data)}')
+    print(f'If you use sfall, add CRC to your ddraw.ini (comma separated list): ExtraCRC={crc}')
   else: # 'ICO'
-    new_icon = ico_file_header48x48 + b_header_48x48 + new_b_cmap_48x48 + new_b_bmp_48x48 + new_b_mask_48x48
-    with open(args.output, 'wb') as out:
-      out.write(new_icon)
+    _ = dc.save_ico(args.output)
     print(f'Extracted data written to ICON file {args.output}')
 
 if __name__ == '__main__':
