@@ -52,6 +52,7 @@ class App:
     def select_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Executable files", "*.exe")])
         if file_path:
+            print('Opening', file_path)
             self.file_path.set(file_path)
             self.dc = DeCainify(file_path)
             self.dc.process()
@@ -97,11 +98,14 @@ class App:
                 else:
                     messagebox.showinfo("Done!", "Saved " + save_path + ' succesfully!')
             elif ext == ".exe":
+                print('Saving', save_path)
                 crc = self.dc.save_exe(save_path)
                 if crc == -1:
+                    print('Error')
                     messagebox.showerror("Error", "Was not able to save " + save_path)
                 else:
-                    messagebox.showinfo("Done!", "Saved " + save_path + ' succesfully!')
+                    print('Done', crc)
+                    messagebox.showinfo("Done!", save_path + ' saved succesfully!')
                     self.show_copyable_message("Info", f'If you use sfall, add CRC to your ddraw.ini (comma separated list):\n\nExtraCRC={crc}')
                     
 
