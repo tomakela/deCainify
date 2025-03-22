@@ -1,5 +1,6 @@
 out/
 dist/
 build/
+__pycache__/
 deCainify_gui.spec
 *.pyc
