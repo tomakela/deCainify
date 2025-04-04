@@ -13,6 +13,8 @@ Select Fallout2.exe (or Fallout2HR.exe or whatever)
 
 And "save as" preferrably with some new file name, such as Fallout2HRdC.exe
 
+If you use sfall (as you most likely are), add the CRC check number to the ddraw.ini ExtraCRC line (remember to remove ";")
+
 ## Dependencies
 pip install pillow, tkinter, numpy
 
